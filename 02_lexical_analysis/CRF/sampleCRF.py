@@ -325,11 +325,12 @@ class myCRF:
         res = "".join(resBuf)  # 输出路径
         return res
 
-    def compute_sentence_score(self, sentence, tags):
+    def compute_sentence_score(self, sentence, tags, debug=False):
         """
         计算给定句子和标签序列的分数
         :param sentence: 输入句子
         :param tags: 标签序列
+        :param debug: 是否开启调试模式
         :return: 分数
         """
         score = 0
@@ -340,18 +341,23 @@ class myCRF:
             else:
                 bigram_score = self.getBigramScore(sentence, i, tags[i - 1], tags[i])
             score += unigram_score + bigram_score
+            if debug:
+                print(f"Position {i}: Unigram Score = {unigram_score}, Bigram Score = {bigram_score}, Total Score = {score}")
         return score
 
-    def compute_partition_function(self, sentence):
+    def compute_partition_function(self, sentence, debug=False):
         """
         计算分区函数 Z(x)，即所有可能标签序列的分数和
         :param sentence: 输入句子
+        :param debug: 是否开启调试模式
         :return: 分区函数值
         """
         lens = len(sentence)
         alpha = [torch.full((4,), -10000.0) for _ in range(lens)]  # 初始化 alpha
         alpha[0] = torch.tensor([self.getUnigramScore(sentence, 0, self.num2Tag(i)) +
                                  self.getBigramScore(sentence, 0, " ", self.num2Tag(i)) for i in range(4)])
+        if debug:
+            print(f"Initial Alpha: {alpha[0]}")
         for i in range(1, lens):
             for curr_tag in range(4):
                 scores = [alpha[i - 1][prev_tag] +
@@ -359,18 +365,59 @@ class myCRF:
                           self.getBigramScore(sentence, i, self.num2Tag(prev_tag), self.num2Tag(curr_tag))
                           for prev_tag in range(4)]
                 alpha[i][curr_tag] = torch.logsumexp(torch.tensor(scores), dim=0)
-        return torch.logsumexp(alpha[-1], dim=0)
+                if debug:
+                    print(f"Position {i}, Current Tag {curr_tag}: Scores = {scores}, Alpha = {alpha[i][curr_tag]}")
+        partition_value = torch.logsumexp(alpha[-1], dim=0)
+        if debug:
+            print(f"Final Partition Function Value: {partition_value}")
+        return partition_value
 
-    def compute_neg_log_likelihood(self, sentence, tags):
+    def compute_neg_log_likelihood(self, sentence, tags, debug=False):
         """
         计算负对数似然损失
         :param sentence: 输入句子
         :param tags: 标签序列
+        :param debug: 是否开启调试模式
         :return: 负对数似然值
         """
-        gold_score = self.compute_sentence_score(sentence, tags)
-        partition_function = self.compute_partition_function(sentence)
-        return partition_function - gold_score
+        gold_score = self.compute_sentence_score(sentence, tags, debug)
+        partition_function = self.compute_partition_function(sentence, debug)
+        neg_log_likelihood = partition_function - gold_score
+        if debug:
+            print(f"Gold Score: {gold_score}, Partition Function: {partition_function}, Negative Log-Likelihood: {neg_log_likelihood}")
+        return neg_log_likelihood
+
+    def myTrain2(self, data, model_path, epochnum=3, learning_rate=0.01):
+        """
+        基于负对数似然损失的权重更新训练函数
+        :param data: 训练数据
+        :param model_path: 模型参数保存路径
+        :param epochnum: 训练批次
+        :param learning_rate: 学习率
+        """
+        sentences, results = self.getTrainData(data)  # 读取数据集
+        optimizer = torch.optim.SGD([torch.tensor(0.0)], lr=learning_rate)  # 初始化优化器（占位符）
+
+        for epoch in range(epochnum):
+            total_loss = 0
+            for sentence, tags in zip(sentences, results):
+                optimizer.zero_grad()  # 梯度清零
+                loss = self.compute_neg_log_likelihood(sentence, tags)  # 计算负对数似然损失
+                loss.backward()  # 反向传播
+                for key in self.scoreMap:  # 更新权重
+                    grad = torch.tensor(self.scoreMap[key]).grad
+                    self.scoreMap[key] -= learning_rate * grad.item()
+                total_loss += loss.item()
+            print(f"Epoch {epoch + 1}/{epochnum}, Loss: {total_loss}")
+        
+        torch.save(
+            {
+                'scoreMap': self.scoreMap,
+                'BigramTemplates': self.BigramTemplates,
+                'UnigramTemplates': self.UnigramTemplates
+            },
+            model_path
+        )
 
     def myTrain(self, data, model_path, epochnum=3, learning_rate=0.01):
         '''
