@@ -1,5 +1,3 @@
-# Author:刘越影
-# Time: 2023-03-25 17:34
 import torch
 
 
@@ -9,7 +7,7 @@ class myCRF:
         self.UnigramTemplates = []  # 状态特征模板
         self.BigramTemplates = []  # 转移特征模板
         self.readTemplate("template.txt")  # 读取特征模板
-        self.character_tagging("199801.txt", "train.txt")  # 原始数据集加工
+        self.character_tagging("train_set.txt", "train_2.txt")  # 原始数据集加工
 
     def readTemplate(self, template_file, debug=False):
         '''
@@ -50,11 +48,12 @@ class myCRF:
         '''
         将原始数据集加工成4-tag形式
         '''
-        with open(input_file, 'r', encoding='gbk') as input_data, \
+        with open(input_file, 'r', encoding='utf-8') as input_data, \
              open(output_file, 'w', encoding='utf-8') as output_data:
             for line in input_data:
-                word_list = line.strip().split(" ")
-                for word in word_list[1:]:
+                word_list = line.strip().split(":")
+                word_list = word_list[-1].strip().split(" ")
+                for word in word_list[:]:
                     words = word.split("/")
                     if len(words) >= 2:
                         xz = words[1]
@@ -303,14 +302,97 @@ class myCRF:
         res = "".join(resBuf)  # 输出路径
         return res
 
-    def myTrain(self, data, model_path, epochnum=3):
+    def train_with_gradient_descent(self, data, model_path, epochnum=3, learning_rate=0.01):
+        '''
+        使用梯度下降的训练方式
+        :param data: 训练数据
+        :param model_path: 模型参数保存路径
+        :param epochnum: 训练批次
+        :param learning_rate: 学习率
+        :return:
+        '''
+        sentences, results = self.getTrainData(data)  # 读取数据集
+        whole = len(sentences)  # 句子数量
+        trainNum = int(whole * 0.8)  # 选前80%句子作为训练集
+
+        # 初始化权重
+        for epoch in range(1, epochnum + 1):
+            total_loss = 0
+            for i in range(0, trainNum):
+                sentence = sentences[i]
+                result = results[i]
+                myRes = self.Viterbi(sentence)  # 当前预测结果
+                for word in range(len(sentence)):
+                    myResI = myRes[word]
+                    theoryResI = result[word]
+                    if myResI != theoryResI:
+                        # 更新Unigram特征
+                        for j, template in enumerate(self.UnigramTemplates):
+                            myKey = self.makeKey(template, str(j), sentence, word, myResI)
+                            theoryKey = self.makeKey(template, str(j), sentence, word, theoryResI)
+                            if myKey not in self.scoreMap:
+                                self.scoreMap[myKey] = [1, -learning_rate]
+                            else:
+                                self.scoreMap[myKey][1] -= learning_rate
+                            if theoryKey not in self.scoreMap:
+                                self.scoreMap[theoryKey] = [1, learning_rate]
+                            else:
+                                self.scoreMap[theoryKey][1] += learning_rate
+
+                        # 更新Bigram特征
+                        for j, template in enumerate(self.BigramTemplates):
+                            if word == 0:
+                                myKey = self.makeKey(template, str(j), sentence, word, " " + myResI)
+                                theoryKey = self.makeKey(template, str(j), sentence, word, " " + theoryResI)
+                            else:
+                                myKey = self.makeKey(template, str(j), sentence, word, myRes[word - 1:word + 1])
+                                theoryKey = self.makeKey(template, str(j), sentence, word, result[word - 1:word + 1])
+                            if myKey not in self.scoreMap:
+                                self.scoreMap[myKey] = [1, -learning_rate]
+                            else:
+                                self.scoreMap[myKey][1] -= learning_rate
+                            if theoryKey not in self.scoreMap:
+                                self.scoreMap[theoryKey] = [1, learning_rate]
+                            else:
+                                self.scoreMap[theoryKey][1] += learning_rate
+
+                # 计算损失
+                wrongNum = self.getWrongNum(sentence, result)
+                total_loss += wrongNum
+
+            print(f"Epoch {epoch}/{epochnum}, Loss: {total_loss}")
+            torch.save(
+                {
+                    'scoreMap': self.scoreMap,
+                    'BigramTemplates': self.BigramTemplates,
+                    'UnigramTemplates': self.UnigramTemplates
+                },
+                model_path
+            )
+
+    def myTrain(self, data, model_path, epochnum=3, use_gradient_descent=False):
         '''
         训练函数
         :param data: 训练数据
         :param model_path: 模型参数保存路径
         :param epochnum: 训练批次
+        :param use_gradient_descent: 是否使用梯度下降训练方式
         :return:
         '''
+        if use_gradient_descent:
+            self.train_with_gradient_descent(data, model_path, epochnum)
+            return
+
+        # 如果模型文件存在，加载权重
+        try:
+            checkpoint = torch.load(model_path)
+            self.scoreMap = checkpoint['scoreMap']
+            self.BigramTemplates = checkpoint['BigramTemplates']
+            self.UnigramTemplates = checkpoint['UnigramTemplates']
+            print(f"Loaded model weights from {model_path}")
+        except FileNotFoundError:
+            print(f"No existing model found at {model_path}, starting training from scratch.")
+
         sentences, results = self.getTrainData(data)  # 读取数据集
         whole = len(sentences)  # 句子数量
         trainNum = int(whole * 0.8)  # 选前80%句子作为训练集
@@ -323,7 +405,7 @@ class myCRF:
                 result = results[i]
                 self.setScoreMap(sentence, result)  # 训练的关键，计算scoreMap
                 wrongNum += self.getWrongNum(sentence, result)  # 计算错误的点数
-                if i % 1000 == 0:  # 每1000个句子打印一次
+                if i % 4000 == 0:  # 每1000个句子打印一次
                     correctNum = totalTest - wrongNum  # 正确点数
                     print("epoch" + str(epoch) + f" {i}/{trainNum} " + ":准确率" + str(float(correctNum / totalTest)))
             correctNum = totalTest - wrongNum  # 正确点数
@@ -387,6 +469,21 @@ class myCRF:
 
 if __name__ == '__main__':
     model = myCRF()
-    model.myTrain("train.txt", "CRF-dataSet.model", epochnum=2)
-    parameter = torch.load("CRF-dataSet.model")
-    print(model.predict("打工人打工魂，打工就是人上人。", parameter))
+    # model.myTrain("train.txt", "CRF-dataSet copy.model", epochnum=7)
+    parameter = torch.load("CRF-dataSet copy.model")
+    # test_file_path = "test.txt"
+    # sentences = []
+    # with open(test_file_path, "r", encoding="utf-8") as f:
+    #     for line in f:
+    #         sentences.append(line.strip())
+    #         print(model.predict(line.strip(), parameter))
+    
+    # s = "明明明明明白白白喜欢他可是他就是不说。"
+    # s = "人要是行，干一行行一行，一行行行行行，行行行干哪行都行。要是不行，干一行不行一行，一行不行行行不行，行行不行干哪行都不行。"
+    # s = "重庆市长江边的景色迷人，让人流连忘返。"
+    # s = "他说的确实在理，这里没有小明要的乒乓球拍，因为乒乓球拍卖完了。"
+    # s = "校长说：校服上除了校徽别别别的，让你们别别别的别别别的你非别别的！"
+    # s = "北京大学生在北京大学学习期间，积极参与研究生命起源的跨学科项目，致力于揭示生命演化的奥秘。"
+    ss = ["中文信息处理课程由同济大学卫老师讲授。", "中国的历史源远流长，有着上下五千年的历史。", "当代大学生在追求梦想的同时，也面临着现实生活中不断变化的竞争和压力。", "两千里的河堤，已经完全支离破碎了，许多地方被敌伪挖成了封锁沟，许多地方被农民改成了耕地。再加上风吹雨打，使许多段河堤连痕迹都没有了。", "最高人民法院认定该区块链金融合约因违反反洗钱法相关条款而无效。", "计算机科学与技术学院的研究生们在国际知名期刊上发表了大量高水平论文，获得广泛认可。"]
+    for s in ss:
+        print(model.predict(s, parameter))
